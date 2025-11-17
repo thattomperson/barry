@@ -1,0 +1,17 @@
+# fly.toml app configuration file generated for barry on 2025-11-17T19:51:39+10:30
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'barry'
+primary_region = 'syd'
+
+[build]
+  [build.args]
+    GO_VERSION = '1.21'
+
+[env]
+  PORT = '8080'
+
+[[vm]]
+  size = 'shared-cpu-1x'
