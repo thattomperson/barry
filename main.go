@@ -26,19 +26,19 @@ func main() {
 		log.Fatal("DISCORD_BOT_TOKEN environment variable is required")
 	}
 
-	flyAPIToken := os.Getenv("FLY_API_TOKEN")
+	flyAPIToken := os.Getenv("MC_FLY_API_TOKEN")
 	if flyAPIToken == "" {
-		log.Fatal("FLY_API_TOKEN environment variable is required")
+		log.Fatal("MC_FLY_API_TOKEN environment variable is required")
 	}
 
-	flyAppName := os.Getenv("FLY_APP_NAME")
+	flyAppName := os.Getenv("MC_FLY_APP_NAME")
 	if flyAppName == "" {
-		log.Fatal("FLY_APP_NAME environment variable is required")
+		log.Fatal("MC_FLY_APP_NAME environment variable is required")
 	}
 
-	machineID := os.Getenv("FLY_MACHINE_ID")
+	machineID := os.Getenv("MC_FLY_MACHINE_ID")
 	if machineID == "" {
-		log.Fatal("FLY_MACHINE_ID environment variable is required")
+		log.Fatal("MC_FLY_MACHINE_ID environment variable is required")
 	}
 
 	// Create Discord session
@@ -112,11 +112,14 @@ func (b *Bot) handleStartServer(s *discordgo.Session, i *discordgo.InteractionCr
 	go func() {
 		// Start the Fly machine
 		if err := b.startFlyMachine(); err != nil {
+			log.Printf("Error starting Fly machine: %v", err)
 			_, _ = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
 				Content: fmt.Sprintf("😿 *squeak* Oh no! My magic spell didn't work quite right... The server didn't want to wake up! %v\n\nMaybe try again? I'll do my best! 🐭✨", err),
 			})
 			return
 		}
+
+		log.Println("Fly machine starting")
 
 		// Poll health checks
 		_, _ = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
@@ -132,6 +135,7 @@ func (b *Bot) handleStartServer(s *discordgo.Session, i *discordgo.InteractionCr
 		// Check immediately first
 		checkCount++
 		if b.checkHealth() {
+			log.Println("Health check passed")
 			_, _ = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
 				Content: "🎉 *happy squeaks* ✨ Ta-da! My magic worked perfectly! The server is all awake and ready to play! 🐭🎮\n\n*does a little mouse dance* 🕺✨",
 			})
@@ -164,6 +168,7 @@ func (b *Bot) handleStartServer(s *discordgo.Session, i *discordgo.InteractionCr
 			}
 
 			if b.checkHealth() {
+				log.Println("Health check passed")
 				_, _ = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
 					Content: "🎉 *happy squeaks* ✨ Ta-da! My magic worked perfectly! The server is all awake and ready to play! 🐭🎮\n\n*does a little mouse dance* 🕺✨",
 				})
