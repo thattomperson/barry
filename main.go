@@ -95,6 +95,17 @@ func (b *Bot) handleInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 	}
 }
 
+// getUserMention returns a Discord mention string for the user who triggered the interaction
+func getUserMention(i *discordgo.InteractionCreate) string {
+	if i.Member != nil && i.Member.User != nil {
+		return fmt.Sprintf("<@%s>", i.Member.User.ID)
+	}
+	if i.User != nil {
+		return fmt.Sprintf("<@%s>", i.User.ID)
+	}
+	return ""
+}
+
 func (b *Bot) handleStartServer(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	// Acknowledge the interaction immediately (Discord requires response within 3 seconds)
 	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
@@ -108,23 +119,28 @@ func (b *Bot) handleStartServer(s *discordgo.Session, i *discordgo.InteractionCr
 		return
 	}
 
+	// Helper to update the original response message
+	updateMessage := func(content string) {
+		_, _ = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+			Content: &content,
+		})
+	}
+
 	// Start the machine in a goroutine
 	go func() {
+		userMention := getUserMention(i)
+
 		// Start the Fly machine
 		if err := b.startFlyMachine(); err != nil {
 			log.Printf("Error starting Fly machine: %v", err)
-			_, _ = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-				Content: fmt.Sprintf("😿 *squeak* Oh no! My magic spell didn't work quite right... The server didn't want to wake up! %v\n\nMaybe try again? I'll do my best! 🐭✨", err),
-			})
+			updateMessage(fmt.Sprintf("😿 *squeak* Oh no! My magic spell didn't work quite right... The server didn't want to wake up! %v\n\nMaybe try again? I'll do my best! 🐭✨", err))
 			return
 		}
 
 		log.Println("Fly machine starting")
 
-		// Poll health checks
-		_, _ = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-			Content: "🔮 *twitching whiskers* The server is stirring! Let me peek into my crystal ball and check if it's feeling healthy... ✨",
-		})
+		// Update message to show we're checking health
+		updateMessage("✨ *squeak squeak* Oh! Time to work my magic! 🪄✨ Let me wake up that sleepy server for you... This might take a moment, but I'm on it! 🐭\n\n🔮 *twitching whiskers* The server is stirring! Let me peek into my crystal ball and check if it's feeling healthy... ✨")
 
 		// Poll health checks every 30 seconds
 		ticker := time.NewTicker(30 * time.Second)
@@ -136,9 +152,7 @@ func (b *Bot) handleStartServer(s *discordgo.Session, i *discordgo.InteractionCr
 		checkCount++
 		if b.checkHealth() {
 			log.Println("Health check passed")
-			_, _ = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-				Content: "🎉 *happy squeaks* ✨ Ta-da! My magic worked perfectly! The server is all awake and ready to play! 🐭🎮\n\n*does a little mouse dance* 🕺✨",
-			})
+			updateMessage("🎉 *happy squeaks* ✨ Ta-da! My magic worked perfectly! The server is all awake and ready to play! 🐭🎮\n\n*does a little mouse dance* 🕺✨")
 			return
 		}
 
@@ -162,15 +176,13 @@ func (b *Bot) handleStartServer(s *discordgo.Session, i *discordgo.InteractionCr
 					idx = int(n.Int64())
 				}
 				remark := remarks[idx]
-				_, _ = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-					Content: remark,
-				})
+				updateMessage(remark)
 			}
 
 			if b.checkHealth() {
 				log.Println("Health check passed")
 				_, _ = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-					Content: "🎉 *happy squeaks* ✨ Ta-da! My magic worked perfectly! The server is all awake and ready to play! 🐭🎮\n\n*does a little mouse dance* 🕺✨",
+					Content: fmt.Sprintf("%s 🎉 *happy squeaks* ✨ Ta-da! My magic worked perfectly! The server is all awake and ready to play! 🐭🎮\n\n*does a little mouse dance* 🕺✨", userMention),
 				})
 				return
 			}
