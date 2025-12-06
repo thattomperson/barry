@@ -153,6 +153,7 @@ func main() {
 
 func (b *Bot) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
+		log.Println("handleWebhook: exit - method not allowed")
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -160,6 +161,7 @@ func (b *Bot) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	// Read body for signature verification
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		log.Printf("handleWebhook: exit - failed to read body: %v", err)
 		http.Error(w, "Failed to read body", http.StatusBadRequest)
 		return
 	}
@@ -170,11 +172,13 @@ func (b *Bot) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	signature := r.Header.Get("X-Signature-Ed25519")
 
 	if timestamp == "" || signature == "" {
+		log.Println("handleWebhook: exit - missing signature headers")
 		http.Error(w, "Missing signature headers", http.StatusUnauthorized)
 		return
 	}
 
 	if !b.discordService.VerifySignature(timestamp, signature, body) {
+		log.Println("handleWebhook: exit - invalid signature")
 		http.Error(w, "Invalid signature", http.StatusUnauthorized)
 		return
 	}
@@ -182,12 +186,14 @@ func (b *Bot) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	// Parse interaction
 	var interaction Interaction
 	if err := json.Unmarshal(body, &interaction); err != nil {
+		log.Printf("handleWebhook: exit - invalid JSON: %v", err)
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
 
 	// Handle ping
 	if interaction.Type == InteractionTypePing {
+		log.Println("handleWebhook: exit - PING interaction handled")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]int{"type": 1}) // PONG
@@ -197,11 +203,13 @@ func (b *Bot) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	// Handle application command
 	if interaction.Type == InteractionTypeApplicationCommand {
 		if interaction.Data != nil && interaction.Data.Name == "start-server" {
+			log.Println("handleWebhook: exit - start-server command handled")
 			b.handleStartServer(w, &interaction)
 			return
 		}
 	}
 
+	log.Printf("handleWebhook: exit - unknown interaction type: %d", interaction.Type)
 	http.Error(w, "Unknown interaction type", http.StatusBadRequest)
 }
 

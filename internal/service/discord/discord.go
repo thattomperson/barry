@@ -9,8 +9,6 @@ import (
 	"io"
 	"net/http"
 	"time"
-
-	"github.com/davecgh/go-spew/spew"
 )
 
 const (
@@ -120,8 +118,6 @@ func (s *Service) CreateCommand(command *ApplicationCommand) error {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("failed to create command: status %d, body: %s", resp.StatusCode, string(body))
 	}
-
-	spew.Dump(io.ReadAll(resp.Body))
 
 	return nil
 }
