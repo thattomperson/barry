@@ -1,4 +1,4 @@
-package main
+package fly
 
 import (
 	"encoding/json"
@@ -49,19 +49,76 @@ type MachineResponse struct {
 	} `json:"events"`
 }
 
-func (b *Bot) startFlyMachine() error {
-	url := fmt.Sprintf("https://api.machines.dev/v1/apps/%s/machines/%s/start", b.flyAppName, b.machineID)
+type Service struct {
+	apiToken  string
+	appName   string
+	machineID string
+}
 
-	req, err := http.NewRequest("POST", url, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+func NewService(apiToken, appName, machineID string) *Service {
+	return &Service{
+		apiToken:  apiToken,
+		appName:   appName,
+		machineID: machineID,
+	}
+}
+
+type requestOptions struct {
+	timeout time.Duration
+	body    io.Reader
+}
+
+type RequestOption func(*requestOptions)
+
+// WithTimeout sets the timeout for the HTTP request
+func WithTimeout(timeout time.Duration) RequestOption {
+	return func(opts *requestOptions) {
+		opts.timeout = timeout
+	}
+}
+
+// WithBody sets the request body
+func WithBody(body io.Reader) RequestOption {
+	return func(opts *requestOptions) {
+		opts.body = body
+	}
+}
+
+// request performs an HTTP request to the Fly API
+func (s *Service) request(method, path string, opts ...RequestOption) (*http.Response, error) {
+	// Default options
+	options := &requestOptions{
+		timeout: 10 * time.Second, // Default timeout
+		body:    nil,              // Default no body
 	}
 
-	req.Header.Set("Authorization", "Bearer "+b.flyAPIToken)
+	// Apply provided options
+	for _, opt := range opts {
+		opt(options)
+	}
+
+	url := fmt.Sprintf("https://api.machines.dev%s", path)
+
+	req, err := http.NewRequest(method, url, options.body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+s.apiToken)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: options.timeout}
 	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute request: %w", err)
+	}
+
+	return resp, nil
+}
+
+func (s *Service) StartMachine() error {
+	path := fmt.Sprintf("/v1/apps/%s/machines/%s/start", s.appName, s.machineID)
+	resp, err := s.request("POST", path, WithTimeout(30*time.Second))
 	if err != nil {
 		return fmt.Errorf("failed to start machine: %w", err)
 	}
@@ -72,12 +129,12 @@ func (b *Bot) startFlyMachine() error {
 		return fmt.Errorf("failed to start machine: status %d, body: %s", resp.StatusCode, string(body))
 	}
 
-	log.Printf("Machine %s started successfully", b.machineID)
+	log.Printf("Machine %s started successfully", s.machineID)
 	return nil
 }
 
-func (b *Bot) checkHealth() bool {
-	machine, err := b.getMachine()
+func (s *Service) CheckHealth() bool {
+	machine, err := s.GetMachine()
 	if err != nil {
 		log.Printf("Failed to get machine status: %v", err)
 		return false
@@ -134,19 +191,9 @@ func (b *Bot) checkHealth() bool {
 	return true
 }
 
-func (b *Bot) getMachine() (*MachineResponse, error) {
-	url := fmt.Sprintf("https://api.machines.dev/v1/apps/%s/machines/%s", b.flyAppName, b.machineID)
-
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Authorization", "Bearer "+b.flyAPIToken)
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+func (s *Service) GetMachine() (*MachineResponse, error) {
+	path := fmt.Sprintf("/v1/apps/%s/machines/%s", s.appName, s.machineID)
+	resp, err := s.request("GET", path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get machine: %w", err)
 	}

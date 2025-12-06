@@ -1,29 +1,67 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math/big"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/thattomperson/barry/internal/service/discord"
+	"github.com/thattomperson/barry/internal/service/fly"
 )
 
 type Bot struct {
-	session     *discordgo.Session
-	flyAPIToken string
-	flyAppName  string
-	machineID   string
+	discordService *discord.Service
+	flyService     *fly.Service
 }
+
+// Interaction represents a Discord interaction
+type Interaction struct {
+	ID     string       `json:"id"`
+	Token  string       `json:"token"`
+	Type   int          `json:"type"`
+	Data   *CommandData `json:"data,omitempty"`
+	Member *Member      `json:"member,omitempty"`
+	User   *User        `json:"user,omitempty"`
+}
+
+// CommandData represents command data in an interaction
+type CommandData struct {
+	Name string `json:"name"`
+}
+
+// Member represents a Discord guild member
+type Member struct {
+	User *User `json:"user"`
+}
+
+// User represents a Discord user
+type User struct {
+	ID string `json:"id"`
+}
+
+const (
+	InteractionTypePing               = 1
+	InteractionTypeApplicationCommand = 2
+)
 
 func main() {
 	botToken := os.Getenv("DISCORD_BOT_TOKEN")
 	if botToken == "" {
 		log.Fatal("DISCORD_BOT_TOKEN environment variable is required")
+	}
+
+	publicKey := os.Getenv("DISCORD_PUBLIC_KEY")
+	if publicKey == "" {
+		log.Fatal("DISCORD_PUBLIC_KEY environment variable is required")
 	}
 
 	flyAPIToken := os.Getenv("MC_FLY_API_TOKEN")
@@ -41,33 +79,29 @@ func main() {
 		log.Fatal("MC_FLY_MACHINE_ID environment variable is required")
 	}
 
-	// Create Discord session
-	session, err := discordgo.New("Bot " + botToken)
+	// Create Discord service
+	discordService, err := discord.NewService(botToken, publicKey)
 	if err != nil {
-		log.Fatalf("Error creating Discord session: %v", err)
+		log.Fatalf("Error creating Discord service: %v", err)
 	}
+
+	// Get application ID
+	appInfo, err := discordService.GetApplicationInfo()
+	if err != nil {
+		log.Fatalf("Error getting application info: %v", err)
+	}
+	discordService.SetApplicationID(appInfo.ID)
+	log.Printf("Bot application ID: %s", appInfo.ID)
+
+	flyService := fly.NewService(flyAPIToken, flyAppName, machineID)
 
 	bot := &Bot{
-		session:     session,
-		flyAPIToken: flyAPIToken,
-		flyAppName:  flyAppName,
-		machineID:   machineID,
+		discordService: discordService,
+		flyService:     flyService,
 	}
-
-	// Register slash command handler
-	session.AddHandler(bot.handleInteraction)
-
-	// Open Discord connection
-	session.Identify.Intents = discordgo.IntentsGuildMessages
-	if err = session.Open(); err != nil {
-		log.Fatalf("Error opening Discord connection: %v", err)
-	}
-	defer session.Close()
-
-	log.Println("Bot is now running. Press CTRL-C to exit.")
 
 	// Register slash command
-	commands := []*discordgo.ApplicationCommand{
+	commands := []*discord.ApplicationCommand{
 		{
 			Name:        "start-server",
 			Description: "✨ Squeak! Let Barry the magical mouse start your server! 🐭",
@@ -75,11 +109,36 @@ func main() {
 	}
 
 	for _, command := range commands {
-		_, err = session.ApplicationCommandCreate(session.State.User.ID, "", command)
-		if err != nil {
+		if err := discordService.CreateCommand(command); err != nil {
 			log.Printf("Cannot create command '%s': %v", command.Name, err)
+		} else {
+			log.Printf("Created command '%s'", command.Name)
 		}
 	}
+
+	// Set up HTTP server
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/interactions", bot.handleWebhook)
+
+	server := &http.Server{
+		Addr:    ":" + port,
+		Handler: mux,
+	}
+
+	// Start server in goroutine
+	go func() {
+		log.Printf("HTTP server listening on port %s", port)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Error starting HTTP server: %v", err)
+		}
+	}()
+
+	log.Println("Bot is now running. Press CTRL-C to exit.")
 
 	// Wait for interrupt signal
 	sc := make(chan os.Signal, 1)
@@ -87,16 +146,67 @@ func main() {
 	<-sc
 
 	log.Println("Bot is shutting down...")
-}
-
-func (b *Bot) handleInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if i.ApplicationCommandData().Name == "start-server" {
-		b.handleStartServer(s, i)
+	if err := server.Close(); err != nil {
+		log.Printf("Error closing server: %v", err)
 	}
 }
 
+func (b *Bot) handleWebhook(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Read body for signature verification
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Failed to read body", http.StatusBadRequest)
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewBuffer(body))
+
+	// Verify signature
+	timestamp := r.Header.Get("X-Signature-Timestamp")
+	signature := r.Header.Get("X-Signature-Ed25519")
+
+	if timestamp == "" || signature == "" {
+		http.Error(w, "Missing signature headers", http.StatusUnauthorized)
+		return
+	}
+
+	if !b.discordService.VerifySignature(timestamp, signature, body) {
+		http.Error(w, "Invalid signature", http.StatusUnauthorized)
+		return
+	}
+
+	// Parse interaction
+	var interaction Interaction
+	if err := json.Unmarshal(body, &interaction); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Handle ping
+	if interaction.Type == InteractionTypePing {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]int{"type": 1}) // PONG
+		return
+	}
+
+	// Handle application command
+	if interaction.Type == InteractionTypeApplicationCommand {
+		if interaction.Data != nil && interaction.Data.Name == "start-server" {
+			b.handleStartServer(w, &interaction)
+			return
+		}
+	}
+
+	http.Error(w, "Unknown interaction type", http.StatusBadRequest)
+}
+
 // getUserMention returns a Discord mention string for the user who triggered the interaction
-func getUserMention(i *discordgo.InteractionCreate) string {
+func getUserMention(i *Interaction) string {
 	if i.Member != nil && i.Member.User != nil {
 		return fmt.Sprintf("<@%s>", i.Member.User.ID)
 	}
@@ -106,24 +216,31 @@ func getUserMention(i *discordgo.InteractionCreate) string {
 	return ""
 }
 
-func (b *Bot) handleStartServer(s *discordgo.Session, i *discordgo.InteractionCreate) {
+func (b *Bot) handleStartServer(w http.ResponseWriter, i *Interaction) {
 	// Acknowledge the interaction immediately (Discord requires response within 3 seconds)
-	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
+	response := &discord.InteractionResponse{
+		Type: discord.InteractionResponseTypeChannelMessageWithSource,
+		Data: &discord.InteractionResponseData{
 			Content: "✨ *squeak squeak* Oh! Time to work my magic! 🪄✨ Let me wake up that sleepy server for you... This might take a moment, but I'm on it! 🐭",
 		},
-	})
-	if err != nil {
-		log.Printf("Error responding to interaction: %v", err)
+	}
+
+	// Respond via HTTP response (Discord expects this for webhook interactions)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		log.Printf("Error encoding response: %v", err)
 		return
 	}
 
 	// Helper to update the original response message
 	updateMessage := func(content string) {
-		_, _ = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+		edit := &discord.WebhookEdit{
 			Content: &content,
-		})
+		}
+		if err := b.discordService.EditInteractionResponse(i.Token, edit); err != nil {
+			log.Printf("Error updating message: %v", err)
+		}
 	}
 
 	// Start the machine in a goroutine
@@ -131,7 +248,7 @@ func (b *Bot) handleStartServer(s *discordgo.Session, i *discordgo.InteractionCr
 		userMention := getUserMention(i)
 
 		// Start the Fly machine
-		if err := b.startFlyMachine(); err != nil {
+		if err := b.flyService.StartMachine(); err != nil {
 			log.Printf("Error starting Fly machine: %v", err)
 			updateMessage(fmt.Sprintf("😿 *squeak* Oh no! My magic spell didn't work quite right... The server didn't want to wake up! %v\n\nMaybe try again? I'll do my best! 🐭✨", err))
 			return
@@ -150,7 +267,7 @@ func (b *Bot) handleStartServer(s *discordgo.Session, i *discordgo.InteractionCr
 
 		// Check immediately first
 		checkCount++
-		if b.checkHealth() {
+		if b.flyService.CheckHealth() {
 			log.Println("Health check passed")
 			updateMessage("🎉 *happy squeaks* ✨ Ta-da! My magic worked perfectly! The server is all awake and ready to play! 🐭🎮\n\n*does a little mouse dance* 🕺✨")
 			return
@@ -179,11 +296,14 @@ func (b *Bot) handleStartServer(s *discordgo.Session, i *discordgo.InteractionCr
 				updateMessage(remark)
 			}
 
-			if b.checkHealth() {
+			if b.flyService.CheckHealth() {
 				log.Println("Health check passed")
-				_, _ = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+				followup := &discord.WebhookParams{
 					Content: fmt.Sprintf("%s 🎉 *happy squeaks* ✨ Ta-da! My magic worked perfectly! The server is all awake and ready to play! 🐭🎮\n\n*does a little mouse dance* 🕺✨", userMention),
-				})
+				}
+				if err := b.discordService.CreateFollowupMessage(i.Token, followup); err != nil {
+					log.Printf("Error creating followup message: %v", err)
+				}
 				return
 			}
 		}
